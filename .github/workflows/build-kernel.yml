@@ -1,189 +1,82 @@
-name: Build J8 kernel (KernelSU / NoMount)
-
-# Save as: .github/workflows/build-kernel.yml  (on the lineage-18.1 branch)
-# Run from: Actions tab -> "Build J8 kernel (KernelSU / NoMount)" -> Run workflow
+name: Build Samsung Galaxy J8 Kernel
 
 on:
   workflow_dispatch:
     inputs:
-      enable_kernelsu:
-        description: "Integrate KernelSU (curl setup.sh)"
+      kernelsu:
+        description: 'Include KernelSU'
         type: boolean
+        required: true
         default: true
       ksu_variant:
-        description: "KernelSU source. manipvlator = syscall-table method (needed for CONFIG_KSU_TAMPER_SYSCALL_TABLE)"
+        description: 'KernelSU variant'
         type: choice
         options:
           - manipvlator
           - tiann
         default: manipvlator
-      ksu_ref:
-        description: "KernelSU branch/tag passed to setup.sh (e.g. master or main)"
-        type: string
-        default: master
-      enable_nomount:
-        description: "Integrate NoMount (curl setup.sh)"
+      nomount:
+        description: 'Include NoMount (requires KernelSU)'
         type: boolean
+        required: true
         default: true
-      nomount_ref:
-        description: "NoMount branch used in the setup.sh URL"
-        type: string
-        default: dev
-      defconfig:
-        description: "Defconfig file name in arch/arm64/configs (empty = auto-detect *j8y18lte*)"
-        type: string
-        default: "j8y18lte_defconfig"
       toolchain:
-        description: "Toolchain (gcc = LineageOS GCC 4.9 prebuilts, clang = proton-clang)"
+        description: 'Toolchain (gcc = LineageOS GCC 4.9 prebuilts, clang = proton-clang)'
         type: choice
         options:
           - gcc
           - clang
         default: gcc
-      toolchain_branch:
-        description: "Branch of the LineageOS GCC prebuilts (falls back to default branch)"
-        type: string
-        default: lineage-18.1
       make_anykernel:
-        description: "Also build an AnyKernel3 zip (UNTESTED layout, verify before flashing)"
+        description: 'Package AnyKernel3 Zip & Create Release'
         type: boolean
-        default: false
+        required: true
+        default: true
+  schedule:
+    - cron: '0 0 * * *'
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: kernel-build-${{ github.ref }}
   cancel-in-progress: true
 
-defaults:
-  run:
-    shell: bash
-
-env:
-  DEVICE: j8y18lte
-  KSU_BACKSLASHXX_URL: https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh
-  KSU_TIANN_URL: https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh
-  NOMOUNT_URL_TEMPLATE: https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/%s/kernel/setup.sh
-
 jobs:
   build:
-    name: Build kernel
     runs-on: ubuntu-22.04
     timeout-minutes: 120
-    env:
-      ENABLE_KSU: ${{ inputs.enable_kernelsu }}
-      KSU_VARIANT: ${{ inputs.ksu_variant }}
-      KSU_REF: ${{ inputs.ksu_ref }}
-      ENABLE_NOMOUNT: ${{ inputs.enable_nomount }}
-      NOMOUNT_REF: ${{ inputs.nomount_ref }}
-      INPUT_DEFCONFIG: ${{ inputs.defconfig }}
-      TOOLCHAIN: ${{ inputs.toolchain }}
-      TC_BRANCH: ${{ inputs.toolchain_branch }}
-      MAKE_ANYKERNEL: ${{ inputs.make_anykernel }}
-
     steps:
-      - name: Checkout kernel source
+      - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          branch: lineage-18.1
 
-      # ------------------------------------------------------------------
-      - name: Preflight (validate inputs, detect arch + defconfig, write helpers)
+      - name: Check Available Disk Space
         run: |
-          set -Eeuo pipefail
+          echo "=== Disk Space Before Build ==="
+          df -h
+          free -h
 
-          # --- validate free-text inputs ---
-          re='^[A-Za-z0-9._/-]+$'
-          for v in INPUT_DEFCONFIG KSU_REF NOMOUNT_REF TC_BRANCH; do
-            val="${!v}"
-            if [ -n "$val" ] && ! [[ $val =~ $re ]]; then
-              echo "::error::Input $v contains illegal characters: '$val'"; exit 1
-            fi
-          done
-          [ -n "$KSU_REF" ]     || echo "KSU_REF=master"     >> "$GITHUB_ENV"
-          [ -n "$NOMOUNT_REF" ] || echo "NOMOUNT_REF=dev"  >> "$GITHUB_ENV"
-          [ -n "$TC_BRANCH" ]   || echo "TC_BRANCH=lineage-18.1" >> "$GITHUB_ENV"
-
-          # --- sanity: is this really a kernel tree? ---
-          for f in Makefile arch/arm64/Kconfig; do
-            [ -e "$f" ] || { echo "::error::$f not found. Not an arm64 kernel tree?"; exit 1; }
-          done
-
-          # --- kernel version ---
-          kv() { sed -n "s/^$1[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p" Makefile | head -n1; }
-          KVER="$(kv VERSION).$(kv PATCHLEVEL).$(kv SUBLEVEL)"
-          echo "Kernel base version: $KVER"
-          echo "KVER=$KVER" >> "$GITHUB_ENV"
-          major="$(kv VERSION)"; minor="$(kv PATCHLEVEL)"
-          if [ "$ENABLE_KSU" = "true" ] && { [ "$major" -lt 4 ] || { [ "$major" -eq 4 ] && [ "$minor" -lt 4 ]; }; }; then
-            echo "::warning::Kernel $KVER is older than 4.4. KernelSU does not officially support it; integration or build may fail."
-          fi
-
-          # --- detect defconfig ---
-          mapfile -t cands < <(find arch/arm64/configs arch/arm/configs -maxdepth 1 -type f -name '*j8y18lte*' 2>/dev/null | sort)
-          chosen=""
-          if [ -n "$INPUT_DEFCONFIG" ]; then
-            for d in arch/arm64/configs arch/arm/configs; do
-              if [ -f "$d/$INPUT_DEFCONFIG" ]; then chosen="$d/$INPUT_DEFCONFIG"; break; fi
-            done
-            [ -n "$chosen" ] || { echo "::error::Defconfig '$INPUT_DEFCONFIG' not found"; exit 1; }
+      - name: Determine Input Flags & Environment
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            echo "kernelsu=true" >> $GITHUB_OUTPUT
+            echo "ksu_variant=manipvlator" >> $GITHUB_OUTPUT
+            echo "nomount=true" >> $GITHUB_OUTPUT
+            echo "toolchain=gcc" >> $GITHUB_OUTPUT
+            echo "make_anykernel=true" >> $GITHUB_OUTPUT
           else
-            for c in "${cands[@]}"; do
-              [ "$(basename "$c")" = "j8y18lte_defconfig" ] && chosen="$c"
-            done
-            if [ -z "$chosen" ]; then
-              for c in "${cands[@]}"; do
-                case "$(basename "$c")" in lineage_*|lineageos_*) chosen="$c"; break;; esac
-              done
-            fi
-            if [ -z "$chosen" ] && [ "${#cands[@]}" -eq 1 ]; then chosen="${cands[0]}"; fi
-            if [ -z "$chosen" ]; then
-              echo "::error::Could not pick a defconfig automatically. Candidates:"
-              printf '  %s\n' "${cands[@]:-<none>}"
-              echo "Re-run the workflow and set the 'defconfig' input."
-              exit 1
-            fi
+            echo "kernelsu=${{ github.event.inputs.kernelsu }}" >> $GITHUB_OUTPUT
+            echo "ksu_variant=${{ github.event.inputs.ksu_variant }}" >> $GITHUB_OUTPUT
+            echo "nomount=${{ github.event.inputs.nomount }}" >> $GITHUB_OUTPUT
+            echo "toolchain=${{ github.event.inputs.toolchain }}" >> $GITHUB_OUTPUT
+            echo "make_anykernel=${{ github.event.inputs.make_anykernel }}" >> $GITHUB_OUTPUT
           fi
-          KARCH="$(echo "$chosen" | cut -d/ -f2)"
-          DEFCONFIG="$(basename "$chosen")"
-          echo "Using $chosen (ARCH=$KARCH)"
-          echo "KARCH=$KARCH"       >> "$GITHUB_ENV"
-          echo "DEFCONFIG=$DEFCONFIG" >> "$GITHUB_ENV"
-          echo "DEFCONFIG_PATH=$chosen" >> "$GITHUB_ENV"
 
-          # --- shared helpers for later steps ---
-          cat > "$RUNNER_TEMP/helpers.sh" <<'EOF'
-          retry() {
-            local n=0 max=4
-            until "$@"; do
-              n=$((n+1))
-              [ "$n" -ge "$max" ] && { echo "Command failed after $max attempts: $*" >&2; return 1; }
-              echo "Attempt $n failed, retrying in $((n*5))s..." >&2
-              sleep $((n*5))
-            done
-          }
-          fetch_script() { # url outfile
-            retry curl --fail --silent --show-error --location \
-              --retry 5 --retry-delay 3 --retry-all-errors \
-              --connect-timeout 20 --max-time 180 -o "$2" "$1"
-            [ -s "$2" ] || { echo "::error::Downloaded script is empty: $1"; return 1; }
-            head -c 2 "$2" | grep -q '^#!' || { echo "::error::Downloaded file is not a script (no shebang): $1"; return 1; }
-            bash -n "$2" || { echo "::error::Downloaded script has syntax errors: $1"; return 1; }
-          }
-          kmake() {
-            local args=(O=out ARCH="$KARCH" SUBARCH="$KARCH" CROSS_COMPILE="$CROSS" HOSTCFLAGS="-fcommon -O2")
-            if [ -n "${CROSS32:-}" ];       then args+=(CROSS_COMPILE_ARM32="$CROSS32"); fi
-            if [ -n "${CC_OVERRIDE:-}" ];   then args+=(CC="$CC_OVERRIDE"); fi
-            if [ -n "${CLANG_TRIPLE_V:-}" ]; then args+=(CLANG_TRIPLE="$CLANG_TRIPLE_V"); fi
-            make -j"$(nproc)" "${args[@]}" "$@"
-          }
-          EOF
-          bash -n "$RUNNER_TEMP/helpers.sh"
-          : > "$RUNNER_TEMP/notes.md"
-
-      # ------------------------------------------------------------------
-      - name: Install host build dependencies
+      - name: Install Host Build Dependencies
         run: |
           set -Eeuo pipefail
           sudo apt-get update -y
@@ -205,262 +98,203 @@ jobs:
           python2 --version
           make --version | head -n1; gcc --version | head -n1
 
-      # ------------------------------------------------------------------
-      - name: Fetch toolchain
+      - name: Fetch Toolchain
         run: |
           set -Eeuo pipefail
-          source "$RUNNER_TEMP/helpers.sh"
           TC="$HOME/tc"; rm -rf "$TC"; mkdir -p "$TC"
-
-          clone_lineage() { # repo dest
-            rm -rf "$2"
-            if retry git clone --depth=1 -b "$TC_BRANCH" "https://github.com/LineageOS/$1" "$2"; then return 0; fi
-            echo "::warning::Branch $TC_BRANCH not found for $1, using default branch"
-            rm -rf "$2"
-            retry git clone --depth=1 "https://github.com/LineageOS/$1" "$2"
-          }
+          TOOLCHAIN="${{ steps.vars.outputs.toolchain }}"
 
           if [ "$TOOLCHAIN" = "gcc" ]; then
-            clone_lineage android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 "$TC/a64"
-            echo "$TC/a64/bin" >> "$GITHUB_PATH"; export PATH="$TC/a64/bin:$PATH"
-            if [ "$KARCH" = "arm64" ]; then
-              clone_lineage android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 "$TC/a32"
-              echo "$TC/a32/bin" >> "$GITHUB_PATH"; export PATH="$TC/a32/bin:$PATH"
-              echo "CROSS=aarch64-linux-android-"       >> "$GITHUB_ENV"
-              echo "CROSS32=arm-linux-androideabi-"     >> "$GITHUB_ENV"
-              aarch64-linux-android-gcc --version | head -n1
-              arm-linux-androideabi-gcc --version | head -n1
-            else
-              echo "CROSS=arm-linux-androideabi-" >> "$GITHUB_ENV"
-              echo "::error::32-bit ARM builds need the arm GCC prebuilt first in PATH; not supported by this workflow"; exit 1
-            fi
+            git clone --depth=1 -b lineage-18.1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 "$TC/a64"
+            git clone --depth=1 -b lineage-18.1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 "$TC/a32"
+            echo "$TC/a64/bin" >> "$GITHUB_PATH"
+            echo "$TC/a32/bin" >> "$GITHUB_PATH"
+            echo "CROSS=aarch64-linux-android-" >> "$GITHUB_ENV"
+            echo "CROSS32=arm-linux-androideabi-" >> "$GITHUB_ENV"
           else
-            rm -rf "$TC/clang"
-            retry git clone --depth=1 https://github.com/kdrag0n/proton-clang "$TC/clang"
-            echo "$TC/clang/bin" >> "$GITHUB_PATH"; export PATH="$TC/clang/bin:$PATH"
-            echo "CROSS=aarch64-linux-gnu-"        >> "$GITHUB_ENV"
-            echo "CROSS32=arm-linux-gnueabi-"      >> "$GITHUB_ENV"
-            echo "CC_OVERRIDE=clang"               >> "$GITHUB_ENV"
+            git clone --depth=1 https://github.com/kdrag0n/proton-clang "$TC/clang"
+            echo "$TC/clang/bin" >> "$GITHUB_PATH"
+            echo "CROSS=aarch64-linux-gnu-" >> "$GITHUB_ENV"
+            echo "CROSS32=arm-linux-gnueabi-" >> "$GITHUB_ENV"
+            echo "CC_OVERRIDE=clang" >> "$GITHUB_ENV"
             echo "CLANG_TRIPLE_V=aarch64-linux-gnu-" >> "$GITHUB_ENV"
-            clang --version | head -n1
           fi
 
-      # ------------------------------------------------------------------
-      - name: Check for pre-existing manual hooks (warn only)
-        if: ${{ inputs.enable_kernelsu && inputs.ksu_variant == 'manipvlator' }}
+      - name: Setup KernelSU and NoMount
         run: |
-          set -Eeuo pipefail
-          if grep -rIl --include='*.c' --include='*.h' 'ksu_handle_' fs kernel drivers security 2>/dev/null | head -n5 | grep -q .; then
-            echo "::warning::Found existing ksu_handle_* references (manual hooks?). The syscall-table method requires them to be removed to avoid conflicts."
-            grep -rIn --include='*.c' --include='*.h' 'ksu_handle_' fs kernel drivers security 2>/dev/null | head -n20 || true
-          else
-            echo "No pre-existing KernelSU manual hooks found."
+          if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ]; then
+            echo "==> Setting up KernelSU..."
+            if [ "${{ steps.vars.outputs.ksu_variant }}" == "tiann" ]; then
+              KSU_URL="https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh"
+            else
+              KSU_URL="https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh"
+            fi
+            curl -sSL --retry 5 --retry-delay 3 -o ksu_setup.sh "$KSU_URL"
+            bash ksu_setup.sh master
+
+            if [ "${{ steps.vars.outputs.nomount }}" == "true" ]; then
+              echo "==> Setting up NoMount..."
+              curl -sSL --retry 5 --retry-delay 3 -o nomount_setup.sh "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh"
+              bash nomount_setup.sh
+            fi
           fi
 
-      # ------------------------------------------------------------------
-      - name: Integrate KernelSU
-        if: ${{ inputs.enable_kernelsu }}
+      - name: Configure Kernel Flags & Validate .config Survival
         run: |
           set -Eeuo pipefail
-          source "$RUNNER_TEMP/helpers.sh"
-          if [ "$KSU_VARIANT" = "tiann" ]; then url="$KSU_TIANN_URL"; else url="$KSU_BACKSLASHXX_URL"; fi
-          echo "Downloading $url"
-          fetch_script "$url" "$RUNNER_TEMP/ksu-setup.sh"
-          sha="$(sha256sum "$RUNNER_TEMP/ksu-setup.sh" | cut -d' ' -f1)"
-          echo "KernelSU setup.sh sha256: $sha"
-          { echo "- KernelSU variant: \`$KSU_VARIANT\`, ref: \`$KSU_REF\`"
-            echo "  - setup.sh: $url"
-            echo "  - sha256: \`$sha\`"; } >> "$RUNNER_TEMP/notes.md"
+          DEFCONFIG="arch/arm64/configs/j8y18lte_defconfig"
+          if [ ! -f "$DEFCONFIG" ]; then
+            echo "Error: Defconfig $DEFCONFIG not found!"
+            exit 1
+          fi
 
-          bash "$RUNNER_TEMP/ksu-setup.sh" "$KSU_REF"
+          if [ -n "$(tail -c1 "$DEFCONFIG")" ]; then echo >> "$DEFCONFIG"; fi
 
-          # verify the integration really happened
-          [ -e drivers/kernelsu ] || [ -d KernelSU ] || { echo "::error::KernelSU directory not found after setup.sh"; exit 1; }
-          grep -qi 'kernelsu' drivers/Makefile || { echo "::error::drivers/Makefile was not patched for KernelSU"; exit 1; }
-          grep -qi 'kernelsu' drivers/Kconfig  || { echo "::error::drivers/Kconfig was not patched for KernelSU"; exit 1; }
-          echo "KernelSU integration verified."
-          git status --short | head -n30 || true
-
-      # ------------------------------------------------------------------
-      - name: Integrate NoMount
-        if: ${{ inputs.enable_nomount }}
-        run: |
-          set -Eeuo pipefail
-          source "$RUNNER_TEMP/helpers.sh"
-          # shellcheck disable=SC2059
-          url="$(printf "$NOMOUNT_URL_TEMPLATE" "$NOMOUNT_REF")"
-          echo "Downloading $url"
-          fetch_script "$url" "$RUNNER_TEMP/nomount-setup.sh"
-          sha="$(sha256sum "$RUNNER_TEMP/nomount-setup.sh" | cut -d' ' -f1)"
-          echo "NoMount setup.sh sha256: $sha"
-          { echo "- NoMount ref: \`$NOMOUNT_REF\` (built-in integration)"
-            echo "  - setup.sh: $url"
-            echo "  - sha256: \`$sha\`"; } >> "$RUNNER_TEMP/notes.md"
-
-          bash "$RUNNER_TEMP/nomount-setup.sh"
-
-          [ -d fs/nomount ] || { echo "::error::fs/nomount not found after setup.sh"; exit 1; }
-          grep -q 'nomount' fs/Makefile || { echo "::error::fs/Makefile was not patched for NoMount"; exit 1; }
-          grep -q 'nomount' fs/Kconfig  || { echo "::error::fs/Kconfig was not patched for NoMount"; exit 1; }
-          echo "NoMount integration verified."
-          git status --short | head -n30 || true
-
-      # ------------------------------------------------------------------
-      - name: Patch defconfig and generate .config
-        run: |
-          set -Eeuo pipefail
-          source "$RUNNER_TEMP/helpers.sh"
-          CFG="$DEFCONFIG_PATH"
-
-          if [ -n "$(tail -c1 "$CFG")" ]; then echo >> "$CFG"; fi
-
-          set_cfg() { # SYMBOL VALUE(y|n|m|string)
-            sed -i -E "/^(# )?CONFIG_$1(=| is not set)/d" "$CFG"
-            if [ "$2" = "n" ]; then echo "# CONFIG_$1 is not set" >> "$CFG"
-            else echo "CONFIG_$1=$2" >> "$CFG"; fi
+          set_cfg() {
+            sed -i -E "/^(# )?CONFIG_$1(=| is not set)/d" "$DEFCONFIG"
+            if [ "$2" = "n" ]; then echo "# CONFIG_$1 is not set" >> "$DEFCONFIG"
+            else echo "CONFIG_$1=$2" >> "$DEFCONFIG"; fi
           }
 
           REQ_Y=(); REQ_N=()
-          if [ "$ENABLE_KSU" = "true" ]; then
+          if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ]; then
             set_cfg KSU y; REQ_Y+=(KSU)
-            if [ "$KSU_VARIANT" = "manipvlator" ]; then
+            if [ "${{ steps.vars.outputs.ksu_variant }}" == "manipvlator" ]; then
               set_cfg KSU_TAMPER_SYSCALL_TABLE y; REQ_Y+=(KSU_TAMPER_SYSCALL_TABLE)
-              set_cfg KPROBES n;                 REQ_N+=(KPROBES)
+              set_cfg KPROBES n; REQ_N+=(KPROBES)
             else
               for s in KPROBES HAVE_KPROBES KPROBE_EVENTS; do set_cfg "$s" y; done
               REQ_Y+=(KPROBES)
             fi
           fi
 
-          echo "---- tail of $CFG ----"; tail -n 12 "$CFG"; echo "----------------------"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export HOSTCFLAGS="-fcommon -O2"
 
           rm -rf out
-          kmake "$DEFCONFIG"
+          make O=out j8y18lte_defconfig
 
-          fail=0
-          for s in "${REQ_Y[@]}"; do
-            if ! grep -qx "CONFIG_$s=y" out/.config; then
-              echo "::error::CONFIG_$s=y did NOT survive into out/.config (unmet dependency or missing Kconfig symbol)"
-              grep -rn --include='Kconfig*' -A12 "config $s\$" . 2>/dev/null | head -n40 || true
-              fail=1
-            fi
-          done
-          for s in "${REQ_N[@]}"; do
-            if grep -qx "CONFIG_$s=y" out/.config; then
-              echo "::error::CONFIG_$s is enabled in out/.config but must be disabled"; fail=1
-            fi
-          done
-          [ "$fail" -eq 0 ] || exit 1
-          echo "All required config options verified in out/.config"
+          if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ]; then
+            for s in "${REQ_Y[@]}"; do
+              if ! grep -qx "CONFIG_$s=y" out/.config; then
+                echo "::error::CONFIG_$s=y did not survive into out/.config due to unmet dependencies."
+                exit 1
+              fi
+            done
+            for s in "${REQ_N[@]}"; do
+              if grep -qx "CONFIG_$s=y" out/.config; then
+                echo "::error::CONFIG_$s is enabled in out/.config but must be disabled."
+                exit 1
+              fi
+            done
+          fi
 
-      # ------------------------------------------------------------------
-      - name: Build kernel
+      - name: Compile Kernel
         run: |
           set -Eeuo pipefail
-          source "$RUNNER_TEMP/helpers.sh"
           mkdir -p "$GITHUB_WORKSPACE/logs"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export HOSTCFLAGS="-fcommon -O2"
+
+          EXTRA_MAKE_ARGS=""
+          if [ -n "${CC_OVERRIDE:-}" ]; then
+            EXTRA_MAKE_ARGS="CC=$CC_OVERRIDE CLANG_TRIPLE=$CLANG_TRIPLE_V"
+          fi
+
           start=$(date +%s)
-          kmake 2>&1 | tee "$GITHUB_WORKSPACE/logs/build.log"
+          make -j$(nproc) O=out ARCH=arm64 \
+            CROSS_COMPILE="$CROSS" \
+            CROSS_COMPILE_ARM32="$CROSS32" \
+            $EXTRA_MAKE_ARGS > >(tee "$GITHUB_WORKSPACE/logs/build.log") 2>&1 || {
+              echo "::error::Kernel compilation failed."
+              exit 1
+            }
           echo "BUILD_SECONDS=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
 
-      - name: Show first errors (on failure)
-        if: failure()
-        run: |
-          grep -nE 'error:|Error [0-9]|undefined reference|No rule to make target|fatal' logs/build.log 2>/dev/null | head -n 40 || true
-
-      # ------------------------------------------------------------------
-      - name: Collect outputs
+      - name: Package AnyKernel3 Zip & Release
+        if: ${{ steps.vars.outputs.make_anykernel == 'true' }}
+        id: package
         run: |
           set -Eeuo pipefail
-          source "$RUNNER_TEMP/helpers.sh"
-          B="out/arch/$KARCH/boot"
-          rm -rf dist; mkdir -p dist
-          found=0
-          for f in Image.gz-dtb Image.gz Image dtb.img; do
-            if [ -f "$B/$f" ]; then cp -v "$B/$f" dist/; found=1; fi
-          done
-          [ "$found" -eq 1 ] || { echo "::error::No kernel image found in $B"; ls -la "$B" || true; exit 1; }
-          find "$B/dts" -name '*.dtb' -exec cp -v {} dist/ \; 2>/dev/null || true
-          cp out/.config dist/config
-          cp "$DEFCONFIG_PATH" "dist/$DEFCONFIG.used"
-          kmake -s kernelrelease > dist/kernelrelease.txt 2>/dev/null || true
-          echo "KREL=$(cat dist/kernelrelease.txt 2>/dev/null || echo unknown)" >> "$GITHUB_ENV"
-          ls -la dist
+          AK3_DIR="AnyKernel3"
+          rm -rf "$AK3_DIR"
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 "$AK3_DIR"
+          rm -rf "$AK3_DIR/.git" "$AK3_DIR/.github"
 
-          tag=""
-          [ "$ENABLE_KSU" = "true" ]     && tag="$tag-ksu"
-          [ "$ENABLE_NOMOUNT" = "true" ] && tag="$tag-nomount"
-          [ -n "$tag" ] || tag="-stock"
-          echo "ARTIFACT_TAG=${DEVICE}${tag}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          B="out/arch/arm64/boot"
+          if [ -f "$B/Image.gz-dtb" ]; then
+            cp "$B/Image.gz-dtb" "$AK3_DIR/"
+          elif [ -f "$B/Image.gz" ]; then
+            cp "$B/Image.gz" "$AK3_DIR/"
+          else
+            cp "$B/Image" "$AK3_DIR/Image"
+            gzip -9 "$AK3_DIR/Image"
+            mv "$AK3_DIR/Image.gz" "$AK3_DIR/Image.gz-dtb"
+          fi
 
-      - name: Build AnyKernel3 zip (optional)
-        if: ${{ inputs.make_anykernel }}
-        run: |
-          set -Eeuo pipefail
-          source "$RUNNER_TEMP/helpers.sh"
-          rm -rf ak3; retry git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
-          rm -rf ak3/.git ak3/.github ak3/modules ak3/patch ak3/ramdisk 2>/dev/null || true
-          mkdir -p ak3/modules ak3/patch ak3/ramdisk
-          cat > ak3/anykernel.sh <<'EOF'
-          ### AnyKernel3 Ramdisk Mod Script (generated by CI)
-          properties() { '
-          kernel.string=J8 kernel (CI build)
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=0
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=j8y18lte
-          device.name2=j8y18lte
-          supported.versions=
-          supported.patchlevels=
-          supported.vendorpatchlevels=
-          '; }
-          BLOCK=/dev/block/bootdevice/by-name/boot;
-          IS_SLOT_DEVICE=0;
-          RAMDISK_COMPRESSION=auto;
-          PATCH_VBMETA_FLAG=auto;
-          . tools/ak3-core.sh;
-          dump_boot;
-          write_boot;
-          EOF
-          B="out/arch/$KARCH/boot"
-          if   [ -f "$B/Image.gz-dtb" ]; then cp "$B/Image.gz-dtb" ak3/
-          elif [ -f "$B/Image.gz" ];     then cp "$B/Image.gz" ak3/
-          else cp "$B/Image" ak3/; fi
-          (cd ak3 && zip -r9 "../dist/AnyKernel3-${ARTIFACT_TAG}.zip" . -x '*.git*' >/dev/null)
-          ls -la dist/*.zip
+          if [ -f "$B/dts/qcom/sdm450.dtb" ]; then
+            cp "$B/dts/qcom/sdm450.dtb" "$AK3_DIR/dtb"
+          fi
 
-      # ------------------------------------------------------------------
-      - name: Upload kernel artifacts
-        uses: actions/upload-artifact@v4
+          KSU_VER="none"
+          NOMOUNT_VER="none"
+          if [ -d "KernelSU" ]; then
+            KSU_VER=$(git -C KernelSU describe --tags --always 2>/dev/null || echo "master")
+          fi
+          if [ -d "NoMount" ]; then
+            NOMOUNT_VER=$(git -C NoMount describe --tags --always 2>/dev/null || echo "dev")
+          fi
+
+          BUILD_DATE=$(date -u +"%Y%m%d-%H%M")
+          if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ]; then
+            ZIP_NAME="J8Kernel-lineage18.1-KSU-${KSU_VER}-NoMount-${NOMOUNT_VER}-${BUILD_DATE}.zip"
+            RELEASE_TITLE="Galaxy J8 Kernel | KSU ${KSU_VER} | NoMount ${NOMOUNT_VER} | ${BUILD_DATE}"
+          else
+            ZIP_NAME="J8Kernel-lineage18.1-Stock-${BUILD_DATE}.zip"
+            RELEASE_TITLE="Galaxy J8 Kernel | Stock | ${BUILD_DATE}"
+          fi
+
+          TAG_NAME="j8-kernel-${BUILD_DATE}"
+
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
+          echo "RELEASE_TITLE=$RELEASE_TITLE" >> $GITHUB_ENV
+          echo "KSU_VER=$KSU_VER" >> $GITHUB_ENV
+          echo "NOMOUNT_VER=$NOMOUNT_VER" >> $GITHUB_ENV
+          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+
+          cd "$AK3_DIR"
+          zip -r9 "../${ZIP_NAME}" .
+          cd ..
+
+      - name: Create GitHub Release
+        if: ${{ steps.vars.outputs.make_anykernel == 'true' }}
+        uses: softprops/action-gh-release@v2
         with:
-          name: ${{ env.ARTIFACT_TAG }}
-          path: dist/
-          if-no-files-found: error
-          retention-days: 14
+          tag_name: ${{ env.TAG_NAME }}
+          name: ${{ env.RELEASE_TITLE }}
+          body: |
+            ## Galaxy J8 Kernel (j8y18lte) - LineageOS 18.1
 
-      - name: Upload logs
+            | Property | Value |
+            |---|---|
+            | Device | Samsung Galaxy J8 (`j8y18lte`, SDM450) |
+            | Toolchain | `${{ steps.vars.outputs.toolchain }}` |
+            | KernelSU | `${{ env.KSU_VER }}` |
+            | NoMount | `${{ env.NOMOUNT_VER }}` |
+            | Build Date | `${{ env.BUILD_DATE }}` |
+
+            Flash via custom recovery (TWRP/OrangeFox).
+          files: ${{ env.ZIP_NAME }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Logs Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-${{ github.run_number }}
+          name: build-logs-${{ github.run_number }}
           path: logs/
-          if-no-files-found: ignore
           retention-days: 7
-
-      - name: Job summary
-        if: always()
-        run: |
-          {
-            echo "## J8 kernel build"
-            echo
-            echo "- Result: \`${{ job.status }}\`"
-            echo "- Kernel base: \`${KVER:-?}\`  release: \`${KREL:-?}\`"
-            echo "- Defconfig: \`${DEFCONFIG:-?}\` (ARCH=\`${KARCH:-?}\`)"
-            echo "- Toolchain: \`${TOOLCHAIN}\`"
-            echo "- KernelSU: \`${ENABLE_KSU}\`  NoMount: \`${ENABLE_NOMOUNT}\`"
-            [ -n "${BUILD_SECONDS:-}" ] && echo "- Build time: ${BUILD_SECONDS}s"
-            echo
-            [ -s "$RUNNER_TEMP/notes.md" ] && cat "$RUNNER_TEMP/notes.md"
-          } >> "$GITHUB_STEP_SUMMARY" || true
