@@ -184,20 +184,25 @@ jobs:
       # ------------------------------------------------------------------
       - name: Install host build dependencies
         run: |
-         set -Eeuo pipefail
+          set -Eeuo pipefail
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
             bc bison flex build-essential libssl-dev libelf-dev libncurses-dev \
             ca-certificates curl git zip unzip cpio rsync kmod lz4 xz-utils \
             python2 device-tree-compiler dwarves || \
-          sudo apt-get install -y python-is-python3 # Fallback if python2 package name differs
-          
-          # Ensure python2 command points correctly if python2 exists
-          if command -v python2 &> /dev/null; then
+          sudo apt-get install -y python-is-python3
+
+          # Explicitly create symlinks so python2 resolves across all PATHs/shells
+          if [ -f /usr/bin/python2.7 ]; then
+            sudo ln -sf /usr/bin/python2.7 /usr/bin/python2
+          elif command -v python2 &> /dev/null; then
             sudo ln -sf $(which python2) /usr/bin/python2
           elif command -v python &> /dev/null; then
             sudo ln -sf $(which python) /usr/bin/python2
           fi
+
+          # Ensure /usr/bin is in PATH and test availability
+          export PATH="/usr/bin:$PATH"
           python2 --version
 
       # ------------------------------------------------------------------
