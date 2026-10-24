@@ -18,9 +18,9 @@ on:
           - tiann
         default: manipvlator
       ksu_ref:
-        description: "KernelSU branch/tag passed to setup.sh (e.g. main)"
+        description: "KernelSU branch/tag passed to setup.sh (e.g. master or main)"
         type: string
-        default: main
+        default: master
       enable_nomount:
         description: "Integrate NoMount (curl setup.sh)"
         type: boolean
@@ -62,7 +62,8 @@ defaults:
 
 env:
   DEVICE: j8y18lte
-  KSU_BACKSLASHXX_URL: https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/main/kernel/setup.sh
+  KSU_BACKSLASHXX_URL: https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh
+  KSU_TIANN_URL: https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh
   NOMOUNT_URL_TEMPLATE: https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/%s/kernel/setup.sh
 
 jobs:
@@ -92,7 +93,7 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          # --- validate free-text inputs (they end up in URLs / git refs) ---
+          # --- validate free-text inputs ---
           re='^[A-Za-z0-9._/-]+$'
           for v in INPUT_DEFCONFIG KSU_REF NOMOUNT_REF TC_BRANCH; do
             val="${!v}"
@@ -100,7 +101,7 @@ jobs:
               echo "::error::Input $v contains illegal characters: '$val'"; exit 1
             fi
           done
-          [ -n "$KSU_REF" ]     || echo "KSU_REF=main"     >> "$GITHUB_ENV"
+          [ -n "$KSU_REF" ]     || echo "KSU_REF=master"     >> "$GITHUB_ENV"
           [ -n "$NOMOUNT_REF" ] || echo "NOMOUNT_REF=dev"  >> "$GITHUB_ENV"
           [ -n "$TC_BRANCH" ]   || echo "TC_BRANCH=lineage-18.1" >> "$GITHUB_ENV"
 
@@ -192,7 +193,6 @@ jobs:
             python2 device-tree-compiler dwarves || \
           sudo apt-get install -y python-is-python3
 
-          # Explicitly create symlinks so python2 resolves across all PATHs/shells
           if [ -f /usr/bin/python2.7 ]; then
             sudo ln -sf /usr/bin/python2.7 /usr/bin/python2
           elif command -v python2 &> /dev/null; then
@@ -201,9 +201,9 @@ jobs:
             sudo ln -sf $(which python) /usr/bin/python2
           fi
 
-          # Ensure /usr/bin is in PATH and test availability
           export PATH="/usr/bin:$PATH"
           python2 --version
+          make --version | head -n1; gcc --version | head -n1
 
       # ------------------------------------------------------------------
       - name: Fetch toolchain
@@ -263,7 +263,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           source "$RUNNER_TEMP/helpers.sh"
-          url="$KSU_BACKSLASHXX_URL"
+          if [ "$KSU_VARIANT" = "tiann" ]; then url="$KSU_TIANN_URL"; else url="$KSU_BACKSLASHXX_URL"; fi
           echo "Downloading $url"
           fetch_script "$url" "$RUNNER_TEMP/ksu-setup.sh"
           sha="$(sha256sum "$RUNNER_TEMP/ksu-setup.sh" | cut -d' ' -f1)"
@@ -312,10 +312,8 @@ jobs:
           source "$RUNNER_TEMP/helpers.sh"
           CFG="$DEFCONFIG_PATH"
 
-          # make sure the file ends with a newline before appending
           if [ -n "$(tail -c1 "$CFG")" ]; then echo >> "$CFG"; fi
 
-          # idempotent setter: removes any existing line for the symbol, then appends
           set_cfg() { # SYMBOL VALUE(y|n|m|string)
             sed -i -E "/^(# )?CONFIG_$1(=| is not set)/d" "$CFG"
             if [ "$2" = "n" ]; then echo "# CONFIG_$1 is not set" >> "$CFG"
@@ -329,7 +327,6 @@ jobs:
               set_cfg KSU_TAMPER_SYSCALL_TABLE y; REQ_Y+=(KSU_TAMPER_SYSCALL_TABLE)
               set_cfg KPROBES n;                 REQ_N+=(KPROBES)
             else
-              # tiann (kprobes hook method) needs kprobes
               for s in KPROBES HAVE_KPROBES KPROBE_EVENTS; do set_cfg "$s" y; done
               REQ_Y+=(KPROBES)
             fi
@@ -340,7 +337,6 @@ jobs:
           rm -rf out
           kmake "$DEFCONFIG"
 
-          # Kconfig silently drops options whose dependencies are unmet; verify.
           fail=0
           for s in "${REQ_Y[@]}"; do
             if ! grep -qx "CONFIG_$s=y" out/.config; then
