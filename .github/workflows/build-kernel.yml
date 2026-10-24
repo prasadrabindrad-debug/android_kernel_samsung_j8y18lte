@@ -62,8 +62,7 @@ defaults:
 
 env:
   DEVICE: j8y18lte
-  KSU_MANIPVLATOR_URL: https://raw.githubusercontent.com/manipvlator/KernelSU/refs/heads/main/kernel/setup.sh
-  KSU_TIANN_URL: https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh
+  KSU_BACKSLASHXX_URL: https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/main/kernel/setup.sh
   NOMOUNT_URL_TEMPLATE: https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/%s/kernel/setup.sh
 
 jobs:
@@ -185,13 +184,21 @@ jobs:
       # ------------------------------------------------------------------
       - name: Install host build dependencies
         run: |
-          set -Eeuo pipefail
+         set -Eeuo pipefail
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
             bc bison flex build-essential libssl-dev libelf-dev libncurses-dev \
             ca-certificates curl git zip unzip cpio rsync kmod lz4 xz-utils \
-            python3 device-tree-compiler dwarves
-          make --version | head -n1; gcc --version | head -n1
+            python2 device-tree-compiler dwarves || \
+          sudo apt-get install -y python-is-python3 # Fallback if python2 package name differs
+          
+          # Ensure python2 command points correctly if python2 exists
+          if command -v python2 &> /dev/null; then
+            sudo ln -sf $(which python2) /usr/bin/python2
+          elif command -v python &> /dev/null; then
+            sudo ln -sf $(which python) /usr/bin/python2
+          fi
+          python2 --version
 
       # ------------------------------------------------------------------
       - name: Fetch toolchain
@@ -251,7 +258,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           source "$RUNNER_TEMP/helpers.sh"
-          if [ "$KSU_VARIANT" = "tiann" ]; then url="$KSU_TIANN_URL"; else url="$KSU_MANIPVLATOR_URL"; fi
+          url="$KSU_BACKSLASHXX_URL"
           echo "Downloading $url"
           fetch_script "$url" "$RUNNER_TEMP/ksu-setup.sh"
           sha="$(sha256sum "$RUNNER_TEMP/ksu-setup.sh" | cut -d' ' -f1)"
