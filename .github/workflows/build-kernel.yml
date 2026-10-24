@@ -191,11 +191,17 @@ jobs:
       - name: Patch KernelSU for Linux 3.18 Compatibility
         if: ${{ steps.vars.outputs.kernelsu == 'true' }}
         run: |
-          echo "Applying fix for adb_root.c sign_extend64 pointer warning..."
+          echo "Applying precise fix for adb_root.c sign_extend64..."
           FILE="drivers/kernelsu/feature/adb_root.c"
           if [ -f "$FILE" ]; then
-            # Cast the pointer argument to (unsigned long) or (u64) to fix the warning
+            # Find the line containing sign_extend64 and replace it safely, or cast the argument explicitly
             sed -i 's/sign_extend64(\([^)]*\))/sign_extend64((unsigned long)(\1))/g' "$FILE" || true
+            
+            # Fallback direct target replacement if the regex pattern differs slightly in backslashxx repo
+            sed -i 's/sign_extend64(\(.*\))/sign_extend64((unsigned long)\1)/g' "$FILE" || true
+            
+            echo "Finished patching adb_root.c:"
+            git diff "$FILE"
           fi
 
       - name: Compile Kernel
